@@ -22,7 +22,7 @@ permissions:
 steps:
   - uses: actions/checkout@v4
     with: { fetch-depth: 0 }    # the diff needs the PR base
-  - uses: TestRooster/actions/select@main
+  - uses: TestRooster/actions/select@v1
     with:
       api-url: https://your-testrooster-host
       src-dir: src/mypkg        # pytest only
@@ -46,7 +46,7 @@ on:
 
 steps:
   - uses: actions/checkout@v4
-  - uses: TestRooster/actions/coverage@main
+  - uses: TestRooster/actions/coverage@v1
     with:
       api-url: https://your-testrooster-host
       # runner: gotest
