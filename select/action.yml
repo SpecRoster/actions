@@ -15,7 +15,7 @@ inputs:
     description: 'TestRooster API base URL'
     required: true
   runner:
-    description: 'Test runner: pytest or gotest'
+    description: 'Test runner: pytest, gotest, dotnet, jest, junit, rspec, cargo, or phpunit'
     required: false
     default: 'pytest'
   src-dir:
@@ -152,61 +152,102 @@ runs:
         JUNIT_PATH: ${{ inputs.junit-path }}
       run: |
         set -uo pipefail
+        jest_env() {
+          export JEST_JUNIT_OUTPUT_DIR="$(dirname "$JUNIT_PATH")"
+          export JEST_JUNIT_OUTPUT_NAME="$(basename "$JUNIT_PATH")"
+          export JEST_JUNIT_CLASSNAME="{filepath}"
+        }
+        merge_surefire() {  # surefire writes one XML per class; our API takes one document
+          { echo '<testsuites>'
+            sed 's/<?xml[^>]*?>//' target/surefire-reports/TEST-*.xml
+            echo '</testsuites>'; } > "$JUNIT_PATH"
+        }
         run_full() {
-          if [ "$RUNNER" = "gotest" ]; then
-            go run gotest.tools/gotestsum@latest --junitfile "$JUNIT_PATH" -- $PYTEST_ARGS ./...
-          elif [ "$RUNNER" = "dotnet" ]; then
-            # Needs the JunitXml.TestLogger package in the test project.
-            dotnet test $PYTEST_ARGS --logger "junit;LogFilePath=$PWD/$JUNIT_PATH"
-          elif [ "$RUNNER" = "jest" ]; then
-            # Needs the jest-junit devDependency.
-            JEST_JUNIT_OUTPUT_DIR="$(dirname "$JUNIT_PATH")" \
-            JEST_JUNIT_OUTPUT_NAME="$(basename "$JUNIT_PATH")" \
-            JEST_JUNIT_CLASSNAME="{filepath}" \
-              npx jest --ci --reporters=default --reporters=jest-junit $PYTEST_ARGS
-          else
-            python -m pytest --junitxml="$JUNIT_PATH" $PYTEST_ARGS
-          fi
+          case "$RUNNER" in
+            gotest)
+              go run gotest.tools/gotestsum@latest --junitfile "$JUNIT_PATH" -- $PYTEST_ARGS ./... ;;
+            dotnet)  # needs the JunitXml.TestLogger package
+              dotnet test $PYTEST_ARGS --logger "junit;LogFilePath=$PWD/$JUNIT_PATH" ;;
+            jest)    # needs the jest-junit devDependency
+              jest_env; npx jest --ci --reporters=default --reporters=jest-junit $PYTEST_ARGS ;;
+            junit)
+              mvn -B test $PYTEST_ARGS; rc=$?; merge_surefire; return $rc ;;
+            rspec)   # needs the rspec_junit_formatter gem
+              bundle exec rspec --format progress --format RspecJunitFormatter --out "$JUNIT_PATH" $PYTEST_ARGS ;;
+            cargo)   # needs cargo-nextest + a junit-enabled "ci" profile in .config/nextest.toml
+              cargo nextest run --workspace --profile ci $PYTEST_ARGS; rc=$?
+              cp target/nextest/ci/junit.xml "$JUNIT_PATH"; return $rc ;;
+            phpunit)
+              XDEBUG_MODE=off vendor/bin/phpunit --log-junit "$JUNIT_PATH" $PYTEST_ARGS ;;
+            *)
+              python -m pytest --junitxml="$JUNIT_PATH" $PYTEST_ARGS ;;
+          esac
         }
         run_subset() {
-          if [ "$RUNNER" = "gotest" ]; then
-            # Manifest entries: "pkg::TestName" + bare "./dir" package
-            # entries (new test files). With bare entries present we run the
-            # whole package set unfiltered — a conservative superset.
-            mapfile -t entries < /tmp/tr_selected.txt
-            pkgs=(); names=(); bare=0
-            for e in "${entries[@]}"; do
-              if [[ "$e" == *"::"* ]]; then
-                pkgs+=("${e%%::*}"); names+=("${e##*::}")
+          case "$RUNNER" in
+            gotest)
+              # Entries: "pkg::TestName" + bare "./dir" package entries (new
+              # test files). With bare entries we run the whole package set
+              # unfiltered — a conservative superset.
+              mapfile -t entries < /tmp/tr_selected.txt
+              pkgs=(); names=(); bare=0
+              for e in "${entries[@]}"; do
+                if [[ "$e" == *"::"* ]]; then
+                  pkgs+=("${e%%::*}"); names+=("${e##*::}")
+                else
+                  pkgs+=("$e"); bare=1
+                fi
+              done
+              mapfile -t pkgs < <(printf '%s\n' "${pkgs[@]}" | sort -u)
+              if [ "$bare" = "1" ]; then
+                go run gotest.tools/gotestsum@latest --junitfile "$JUNIT_PATH" -- $PYTEST_ARGS "${pkgs[@]}"
               else
-                pkgs+=("$e"); bare=1
-              fi
-            done
-            mapfile -t pkgs < <(printf '%s\n' "${pkgs[@]}" | sort -u)
-            if [ "$bare" = "1" ]; then
-              go run gotest.tools/gotestsum@latest --junitfile "$JUNIT_PATH" -- $PYTEST_ARGS "${pkgs[@]}"
-            else
-              regex="^($(printf '%s\n' "${names[@]}" | sort -u | paste -sd'|' -))$"
-              go run gotest.tools/gotestsum@latest --junitfile "$JUNIT_PATH" -- $PYTEST_ARGS -run "$regex" "${pkgs[@]}"
-            fi
-          elif [ "$RUNNER" = "dotnet" ]; then
-            # Entries: "Ns.Class::Method" → FQN contains-filter;
-            # "class:Base" (new test files) → class-name contains-filter.
-            FILTER=$(awk '
-              /::/   { gsub("::", "."); print "FullyQualifiedName~" $0; next }
-              /^class:/ { sub("^class:", ""); print "FullyQualifiedName~" $0 }
-            ' /tmp/tr_selected.txt | sort -u | paste -sd'|' -)
-            dotnet test $PYTEST_ARGS --filter "$FILTER" --logger "junit;LogFilePath=$PWD/$JUNIT_PATH"
-          elif [ "$RUNNER" = "jest" ]; then
-            # Manifest entries are spec file paths; run exactly those files.
-            JEST_JUNIT_OUTPUT_DIR="$(dirname "$JUNIT_PATH")" \
-            JEST_JUNIT_OUTPUT_NAME="$(basename "$JUNIT_PATH")" \
-            JEST_JUNIT_CLASSNAME="{filepath}" \
+                regex="^($(printf '%s\n' "${names[@]}" | sort -u | paste -sd'|' -))$"
+                go run gotest.tools/gotestsum@latest --junitfile "$JUNIT_PATH" -- $PYTEST_ARGS -run "$regex" "${pkgs[@]}"
+              fi ;;
+            dotnet)
+              # "Ns.Class::Method" → FQN contains-filter; "class:Base" (new
+              # test files) → class-name contains-filter.
+              FILTER=$(awk '
+                /::/   { gsub("::", "."); print "FullyQualifiedName~" $0; next }
+                /^class:/ { sub("^class:", ""); print "FullyQualifiedName~" $0 }
+              ' /tmp/tr_selected.txt | sort -u | paste -sd'|' -)
+              dotnet test $PYTEST_ARGS --filter "$FILTER" --logger "junit;LogFilePath=$PWD/$JUNIT_PATH" ;;
+            jest)
+              jest_env
               xargs -a /tmp/tr_selected.txt npx jest --ci \
-                --reporters=default --reporters=jest-junit $PYTEST_ARGS --runTestsByPath
-          else
-            xargs -a /tmp/tr_selected.txt python -m pytest --junitxml="$JUNIT_PATH" $PYTEST_ARGS
-          fi
+                --reporters=default --reporters=jest-junit $PYTEST_ARGS --runTestsByPath ;;
+            junit)
+              # "pkg.Class::method" → Class#method; "class:Foo" → bare class.
+              DTEST=$(awk '
+                /::/   { sub("::", "#"); print; next }
+                /^class:/ { sub("^class:", ""); print }
+              ' /tmp/tr_selected.txt | sort -u | paste -sd',' -)
+              mvn -B test "-Dtest=$DTEST" -Dsurefire.failIfNoSpecifiedTests=false $PYTEST_ARGS
+              rc=$?; merge_surefire; return $rc ;;
+            rspec)
+              # Entries are spec file paths.
+              xargs -a /tmp/tr_selected.txt bundle exec rspec \
+                --format progress --format RspecJunitFormatter --out "$JUNIT_PATH" $PYTEST_ARGS ;;
+            cargo)
+              # "mod::test" → exact test filter; "bin:foo" → whole test binary.
+              EXPR=$(awk '
+                /::/   { print "test(=" $0 ")"; next }
+                /^bin:/ { sub("^bin:", ""); print "binary(" $0 ")" }
+              ' /tmp/tr_selected.txt | sort -u | paste -sd'|' - | sed 's/|/ or /g')
+              cargo nextest run --workspace --profile ci -E "$EXPR" $PYTEST_ARGS; rc=$?
+              cp target/nextest/ci/junit.xml "$JUNIT_PATH"; return $rc ;;
+            phpunit)
+              # "Ns.Cls::method" → anchored regex; "class:Foo" → class match.
+              FILTER=$(awk '
+                /::/      { class=$0; sub("::.*","",class); m=$0; sub(".*::","",m);
+                            gsub("\\.","\\\\\\\\",class); print "^(?:" class "::" m ")$"; next }
+                /^class:/ { sub("^class:",""); print "(^|\\\\\\\\)" $0 "::" }
+              ' /tmp/tr_selected.txt | sort -u | paste -sd'|' -)
+              XDEBUG_MODE=off vendor/bin/phpunit --log-junit "$JUNIT_PATH" --filter "$FILTER" $PYTEST_ARGS ;;
+            *)
+              xargs -a /tmp/tr_selected.txt python -m pytest --junitxml="$JUNIT_PATH" $PYTEST_ARGS ;;
+          esac
         }
         # Shadow mode (or no snapshot): run everything — selection is
         # report-only until the customer turns enforcement on.

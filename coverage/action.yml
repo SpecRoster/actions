@@ -9,7 +9,7 @@ inputs:
     description: 'TestRooster API base URL'
     required: true
   runner:
-    description: 'Test runner: pytest or gotest'
+    description: 'Test runner: pytest, gotest, dotnet, jest, junit, rspec, cargo, or phpunit'
     required: false
     default: 'pytest'
   pytest-args:
@@ -28,6 +28,10 @@ inputs:
     description: 'Command that runs the TestRooster Jest coverage collector (jest only)'
     required: false
     default: 'testrooster-jestcover'
+  collector-cmd:
+    description: 'Command that runs the TestRooster coverage collector for junit/rspec/cargo/phpunit runners (defaults to testrooster-<runner>cover naming)'
+    required: false
+    default: ''
   test-project:
     description: 'Test project directory (dotnet only; empty = auto-discover all test projects)'
     required: false
@@ -44,6 +48,7 @@ runs:
         GOCOVER_CMD: ${{ inputs.gocover-cmd }}
         DOTNETCOVER_CMD: ${{ inputs.dotnetcover-cmd }}
         JESTCOVER_CMD: ${{ inputs.jestcover-cmd }}
+        COLLECTOR_CMD: ${{ inputs.collector-cmd }}
         TEST_PROJECT: ${{ inputs.test-project }}
       run: |
         set -euo pipefail
@@ -59,6 +64,19 @@ runs:
         elif [ "$RUNNER" = "jest" ]; then
           # Per-spec-file Istanbul collection.
           $JESTCOVER_CMD -dir . -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
+        elif [ "$RUNNER" = "junit" ]; then
+          ${COLLECTOR_CMD:-testrooster-jvmcover} -dir . -repo-root . \
+            -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
+        elif [ "$RUNNER" = "rspec" ]; then
+          ${COLLECTOR_CMD:-testrooster-rbcover} -dir . \
+            -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
+        elif [ "$RUNNER" = "cargo" ]; then
+          # Needs cargo-llvm-cov installed (cargo +stable install cargo-llvm-cov).
+          ${COLLECTOR_CMD:-testrooster-rustcover} -dir . \
+            -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
+        elif [ "$RUNNER" = "phpunit" ]; then
+          ${COLLECTOR_CMD:-testrooster-phpcover} -dir . -repo-root . \
+            -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
         else
           # Per-test dynamic contexts are what make the reverse index possible.
           if [ ! -f .coveragerc ] && [ ! -f setup.cfg ] || ! grep -rq dynamic_context .coveragerc setup.cfg pyproject.toml 2>/dev/null; then
