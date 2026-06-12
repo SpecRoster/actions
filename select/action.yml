@@ -1,0 +1,235 @@
+name: 'TestRooster Select'
+description: >
+  Run only the tests in your change's blast radius. Exchanges a GitHub
+  Actions OIDC token for a TestRooster run token (no API keys to manage),
+  fetches the selection manifest, runs the subset with pytest, and reports
+  results. In shadow mode (the default for new installs) the full suite
+  still runs — nothing is skipped until you've seen the would-be savings.
+author: 'TestRooster'
+branding:
+  icon: 'filter'
+  color: 'orange'
+
+inputs:
+  api-url:
+    description: 'TestRooster API base URL'
+    required: true
+  runner:
+    description: 'Test runner: pytest or gotest'
+    required: false
+    default: 'pytest'
+  src-dir:
+    description: 'Repo-relative directory holding product source (required for pytest; optional monorepo scope for gotest)'
+    required: false
+    default: ''
+  test-dir:
+    description: 'Repo-relative directory holding tests (pytest only)'
+    required: false
+    default: 'tests'
+  pytest-args:
+    description: 'Extra arguments passed to the test runner'
+    required: false
+    default: ''
+  junit-path:
+    description: 'Where to write the JUnit report'
+    required: false
+    default: 'testrooster-junit.xml'
+  trigger:
+    description: 'pr (blast radius over the change set) or nightly (value-ranked budget-fill over the whole suite)'
+    required: false
+    default: 'pr'
+  budget-ms:
+    description: 'Run-duration budget in milliseconds (0 = none). The guaranteed floor is exempt.'
+    required: false
+    default: '0'
+  core-tests:
+    description: 'Newline-separated glob patterns over canonical test IDs that always run (the tagged-core floor)'
+    required: false
+    default: ''
+
+outputs:
+  run-id:
+    description: 'TestRooster run id'
+    value: ${{ steps.select.outputs.run_id }}
+  selected-count:
+    description: 'Number of tests selected'
+    value: ${{ steps.select.outputs.selected_count }}
+  suite-count:
+    description: 'Total tests in the suite'
+    value: ${{ steps.select.outputs.suite_count }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Select tests via Blast Radius
+      id: select
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        RUNNER: ${{ inputs.runner }}
+        SRC_DIR: ${{ inputs.src-dir }}
+        TEST_DIR: ${{ inputs.test-dir }}
+        TRIGGER: ${{ inputs.trigger }}
+        BUDGET_MS: ${{ inputs.budget-ms }}
+        CORE_TESTS: ${{ inputs.core-tests }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: |
+        set -euo pipefail
+
+        # 1. The change set (PR trigger only; nightly ranks the whole suite).
+        #    Requires the caller to checkout with enough history:
+        #    fetch-depth: 0, or deep enough to contain the base.
+        if [ "$TRIGGER" = "nightly" ] || [ -z "$HEAD_SHA" ]; then
+          : > /tmp/tr_changed.txt
+          HEAD_SHA="$GITHUB_SHA"
+          BASE_SHA=""
+        else
+          git fetch --no-tags --quiet origin "$BASE_SHA" || true
+          git diff --name-only "$BASE_SHA" "$HEAD_SHA" > /tmp/tr_changed.txt
+        fi
+        echo "changed files: $(wc -l < /tmp/tr_changed.txt)"
+
+        # 2. Prove identity with OIDC (needs `permissions: id-token: write`).
+        OIDC=$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=testrooster" | jq -r .value)
+        TR_TOKEN=$(curl -sSf -X POST "$API_URL/api/v1/token" \
+          -H 'Content-Type: application/json' \
+          -d "$(jq -n --arg t "$OIDC" '{oidc_token: $t}')" | jq -r .token)
+        echo "::add-mask::$TR_TOKEN"
+
+        # 3. Get the selection manifest.
+        BODY=$(jq -n \
+          --arg head "$HEAD_SHA" --arg base "$BASE_SHA" \
+          --arg src "$SRC_DIR" --arg tests "$TEST_DIR" \
+          --arg runner "$RUNNER" --arg trigger "$TRIGGER" \
+          --arg core "$CORE_TESTS" \
+          --argjson budget "${BUDGET_MS:-0}" \
+          --argjson pr "${PR_NUMBER:-0}" \
+          --rawfile changed /tmp/tr_changed.txt \
+          '{head_sha: $head, base_sha: $base, pr_number: $pr, src_dir: $src,
+            test_dir: $tests, runner: $runner, trigger: $trigger,
+            budget_ms: $budget,
+            core_tests: ($core | split("\n") | map(select(length > 0))),
+            changed_files: ($changed | split("\n") | map(select(length > 0)))}')
+        curl -sSf -X POST "$API_URL/api/v1/runs" \
+          -H "Authorization: Bearer $TR_TOKEN" -H 'Content-Type: application/json' \
+          -d "$BODY" > /tmp/tr_run.json
+
+        RUN_ID=$(jq -r .run_id /tmp/tr_run.json)
+        SHADOW=$(jq -r .shadow /tmp/tr_run.json)
+        RUN_FULL=$(jq -r .run_full /tmp/tr_run.json)
+        SELECTED_COUNT=$(jq -r .selected_count /tmp/tr_run.json)
+        SUITE_COUNT=$(jq -r .suite_count /tmp/tr_run.json)
+        jq -r '.selected[]?' /tmp/tr_run.json > /tmp/tr_selected.txt
+
+        {
+          echo "run_id=$RUN_ID"
+          echo "selected_count=$SELECTED_COUNT"
+          echo "suite_count=$SUITE_COUNT"
+        } >> "$GITHUB_OUTPUT"
+        echo "TR_TOKEN=$TR_TOKEN" >> "$GITHUB_ENV"
+        echo "TR_RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+        echo "TR_SHADOW=$SHADOW" >> "$GITHUB_ENV"
+        echo "TR_RUN_FULL=$RUN_FULL" >> "$GITHUB_ENV"
+
+        echo "## TestRooster" >> "$GITHUB_STEP_SUMMARY"
+        if [ "$RUN_FULL" = "true" ]; then
+          echo "No coverage snapshot yet — running the full suite." >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "Blast Radius selected **$SELECTED_COUNT of $SUITE_COUNT** tests." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$SHADOW" = "true" ]; then
+            echo "_Shadow mode: the full suite still runs; nothing is skipped yet._" >> "$GITHUB_STEP_SUMMARY"
+          fi
+        fi
+
+    - name: Run tests
+      shell: bash
+      env:
+        RUNNER: ${{ inputs.runner }}
+        PYTEST_ARGS: ${{ inputs.pytest-args }}
+        JUNIT_PATH: ${{ inputs.junit-path }}
+      run: |
+        set -uo pipefail
+        run_full() {
+          if [ "$RUNNER" = "gotest" ]; then
+            go run gotest.tools/gotestsum@latest --junitfile "$JUNIT_PATH" -- $PYTEST_ARGS ./...
+          else
+            python -m pytest --junitxml="$JUNIT_PATH" $PYTEST_ARGS
+          fi
+        }
+        run_subset() {
+          if [ "$RUNNER" = "gotest" ]; then
+            # Manifest entries: "pkg::TestName" + bare "./dir" package
+            # entries (new test files). With bare entries present we run the
+            # whole package set unfiltered — a conservative superset.
+            mapfile -t entries < /tmp/tr_selected.txt
+            pkgs=(); names=(); bare=0
+            for e in "${entries[@]}"; do
+              if [[ "$e" == *"::"* ]]; then
+                pkgs+=("${e%%::*}"); names+=("${e##*::}")
+              else
+                pkgs+=("$e"); bare=1
+              fi
+            done
+            mapfile -t pkgs < <(printf '%s\n' "${pkgs[@]}" | sort -u)
+            if [ "$bare" = "1" ]; then
+              go run gotest.tools/gotestsum@latest --junitfile "$JUNIT_PATH" -- $PYTEST_ARGS "${pkgs[@]}"
+            else
+              regex="^($(printf '%s\n' "${names[@]}" | sort -u | paste -sd'|' -))$"
+              go run gotest.tools/gotestsum@latest --junitfile "$JUNIT_PATH" -- $PYTEST_ARGS -run "$regex" "${pkgs[@]}"
+            fi
+          else
+            xargs -a /tmp/tr_selected.txt python -m pytest --junitxml="$JUNIT_PATH" $PYTEST_ARGS
+          fi
+        }
+        # Shadow mode (or no snapshot): run everything — selection is
+        # report-only until the customer turns enforcement on.
+        if [ "$TR_SHADOW" = "true" ] || [ "$TR_RUN_FULL" = "true" ]; then
+          run_full
+          TR_EXIT=$?
+        elif [ ! -s /tmp/tr_selected.txt ]; then
+          # Empty blast radius: running the runner with no args would run
+          # the FULL suite — the exact opposite of an empty selection.
+          echo "No tests in the blast radius — nothing to run."
+          echo '<?xml version="1.0"?><testsuite name="testrooster" tests="0"/>' > "$JUNIT_PATH"
+          TR_EXIT=0
+        else
+          run_subset
+          TR_EXIT=$?
+        fi
+        echo "TR_EXIT=$TR_EXIT" >> "$GITHUB_ENV"
+        exit 0
+
+    - name: Report results to TestRooster
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        JUNIT_PATH: ${{ inputs.junit-path }}
+      run: |
+        set -euo pipefail
+        OUTCOME=passed
+        [ "${TR_EXIT:-1}" -eq 0 ] || OUTCOME=failed
+        if curl -sSf -X POST "$API_URL/api/v1/runs/$TR_RUN_ID/results?outcome=$OUTCOME" \
+          -H "Authorization: Bearer $TR_TOKEN" \
+          -H 'Content-Type: application/xml' \
+          --data-binary "@$JUNIT_PATH" > /tmp/tr_report.json; then
+          # Shadow report: what selection WOULD have missed (cost: nothing —
+          # the full suite ran). This is the trust metric.
+          if [ "$(jq -r .audited /tmp/tr_report.json)" = "true" ]; then
+            MISSED=$(jq -r '.missed | length' /tmp/tr_report.json)
+            RATE=$(jq -r '.projected_miss_rate * 100 | round' /tmp/tr_report.json)
+            RUNS=$(jq -r .shadow_runs /tmp/tr_report.json)
+            {
+              echo ""
+              echo "**Shadow audit:** $MISSED failure(s) outside the selected set this run."
+              jq -r '.missed[] | "- would have missed: `\(.)`"' /tmp/tr_report.json
+              echo "Projected miss-rate so far: **$RATE%** over $RUNS audited run(s)."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+        else
+          echo "::warning::failed to upload results to TestRooster"
+        fi
+        # The check result lands in THIS job: exit with the test status.
+        exit "${TR_EXIT:-1}"

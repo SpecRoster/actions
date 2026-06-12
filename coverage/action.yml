@@ -1,0 +1,69 @@
+name: 'TestRooster Coverage Snapshot'
+description: >
+  Run the full suite with per-test coverage and upload the snapshot
+  TestRooster's Blast Radius selection resolves against. Intended for a
+  nightly schedule (and the full-suite safety-net run).
+
+inputs:
+  api-url:
+    description: 'TestRooster API base URL'
+    required: true
+  runner:
+    description: 'Test runner: pytest or gotest'
+    required: false
+    default: 'pytest'
+  pytest-args:
+    description: 'Extra arguments passed to pytest (pytest only)'
+    required: false
+    default: ''
+  gocover-cmd:
+    description: 'Command that runs the TestRooster Go coverage collector (gotest only)'
+    required: false
+    default: 'go run ./cmd/testrooster-gocover'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Full suite with per-test coverage
+      shell: bash
+      env:
+        RUNNER: ${{ inputs.runner }}
+        PYTEST_ARGS: ${{ inputs.pytest-args }}
+        GOCOVER_CMD: ${{ inputs.gocover-cmd }}
+      run: |
+        set -euo pipefail
+        if [ "$RUNNER" = "gotest" ]; then
+          # The collector runs each Test in its own `go test -coverprofile
+          # -coverpkg=./...` invocation — Go's stand-in for per-test contexts.
+          $GOCOVER_CMD -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
+        else
+          # Per-test dynamic contexts are what make the reverse index possible.
+          if [ ! -f .coveragerc ] && [ ! -f setup.cfg ] || ! grep -rq dynamic_context .coveragerc setup.cfg pyproject.toml 2>/dev/null; then
+            printf '[run]\ndynamic_context = test_function\n' > /tmp/tr_coveragerc
+            export COVERAGE_RCFILE=/tmp/tr_coveragerc
+          fi
+          python -m coverage run -m pytest $PYTEST_ARGS
+          python -m coverage json --show-contexts -o /tmp/tr_coverage.json
+          python -m pytest --collect-only -q > /tmp/tr_collected.txt || true
+        fi
+
+    - name: Upload snapshot
+      shell: bash
+      env:
+        API_URL: ${{ inputs.api-url }}
+        RUNNER: ${{ inputs.runner }}
+      run: |
+        set -euo pipefail
+        OIDC=$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=testrooster" | jq -r .value)
+        TR_TOKEN=$(curl -sSf -X POST "$API_URL/api/v1/token" \
+          -H 'Content-Type: application/json' \
+          -d "$(jq -n --arg t "$OIDC" '{oidc_token: $t}')" | jq -r .token)
+        echo "::add-mask::$TR_TOKEN"
+        curl -sSf -X POST "$API_URL/api/v1/coverage" \
+          -H "Authorization: Bearer $TR_TOKEN" \
+          -F "head_sha=$GITHUB_SHA" \
+          -F "runner=$RUNNER" \
+          -F "coverage=@/tmp/tr_coverage.json" \
+          -F "collected=@/tmp/tr_collected.txt"
+        echo "coverage snapshot uploaded"
