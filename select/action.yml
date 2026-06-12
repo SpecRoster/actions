@@ -155,6 +155,9 @@ runs:
         run_full() {
           if [ "$RUNNER" = "gotest" ]; then
             go run gotest.tools/gotestsum@latest --junitfile "$JUNIT_PATH" -- $PYTEST_ARGS ./...
+          elif [ "$RUNNER" = "dotnet" ]; then
+            # Needs the JunitXml.TestLogger package in the test project.
+            dotnet test $PYTEST_ARGS --logger "junit;LogFilePath=$PWD/$JUNIT_PATH"
           else
             python -m pytest --junitxml="$JUNIT_PATH" $PYTEST_ARGS
           fi
@@ -180,6 +183,14 @@ runs:
               regex="^($(printf '%s\n' "${names[@]}" | sort -u | paste -sd'|' -))$"
               go run gotest.tools/gotestsum@latest --junitfile "$JUNIT_PATH" -- $PYTEST_ARGS -run "$regex" "${pkgs[@]}"
             fi
+          elif [ "$RUNNER" = "dotnet" ]; then
+            # Entries: "Ns.Class::Method" → FQN contains-filter;
+            # "class:Base" (new test files) → class-name contains-filter.
+            FILTER=$(awk '
+              /::/   { gsub("::", "."); print "FullyQualifiedName~" $0; next }
+              /^class:/ { sub("^class:", ""); print "FullyQualifiedName~" $0 }
+            ' /tmp/tr_selected.txt | sort -u | paste -sd'|' -)
+            dotnet test $PYTEST_ARGS --filter "$FILTER" --logger "junit;LogFilePath=$PWD/$JUNIT_PATH"
           else
             xargs -a /tmp/tr_selected.txt python -m pytest --junitxml="$JUNIT_PATH" $PYTEST_ARGS
           fi

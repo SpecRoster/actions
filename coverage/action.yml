@@ -20,6 +20,14 @@ inputs:
     description: 'Command that runs the TestRooster Go coverage collector (gotest only)'
     required: false
     default: 'go run ./cmd/testrooster-gocover'
+  dotnetcover-cmd:
+    description: 'Command that runs the TestRooster .NET coverage collector (dotnet only)'
+    required: false
+    default: 'testrooster-dotnetcover'
+  test-project:
+    description: 'Test project directory (dotnet only)'
+    required: false
+    default: '.'
 
 runs:
   using: 'composite'
@@ -30,12 +38,19 @@ runs:
         RUNNER: ${{ inputs.runner }}
         PYTEST_ARGS: ${{ inputs.pytest-args }}
         GOCOVER_CMD: ${{ inputs.gocover-cmd }}
+        DOTNETCOVER_CMD: ${{ inputs.dotnetcover-cmd }}
+        TEST_PROJECT: ${{ inputs.test-project }}
       run: |
         set -euo pipefail
         if [ "$RUNNER" = "gotest" ]; then
           # The collector runs each Test in its own `go test -coverprofile
           # -coverpkg=./...` invocation — Go's stand-in for per-test contexts.
           $GOCOVER_CMD -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
+        elif [ "$RUNNER" = "dotnet" ]; then
+          # Per-test coverlet.msbuild collection (test project must
+          # reference the coverlet.msbuild package).
+          $DOTNETCOVER_CMD -project "$TEST_PROJECT" -repo-root . \
+            -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
         else
           # Per-test dynamic contexts are what make the reverse index possible.
           if [ ! -f .coveragerc ] && [ ! -f setup.cfg ] || ! grep -rq dynamic_context .coveragerc setup.cfg pyproject.toml 2>/dev/null; then
