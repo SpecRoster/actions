@@ -158,6 +158,12 @@ runs:
           elif [ "$RUNNER" = "dotnet" ]; then
             # Needs the JunitXml.TestLogger package in the test project.
             dotnet test $PYTEST_ARGS --logger "junit;LogFilePath=$PWD/$JUNIT_PATH"
+          elif [ "$RUNNER" = "jest" ]; then
+            # Needs the jest-junit devDependency.
+            JEST_JUNIT_OUTPUT_DIR="$(dirname "$JUNIT_PATH")" \
+            JEST_JUNIT_OUTPUT_NAME="$(basename "$JUNIT_PATH")" \
+            JEST_JUNIT_CLASSNAME="{filepath}" \
+              npx jest --ci --reporters=default --reporters=jest-junit $PYTEST_ARGS
           else
             python -m pytest --junitxml="$JUNIT_PATH" $PYTEST_ARGS
           fi
@@ -191,6 +197,13 @@ runs:
               /^class:/ { sub("^class:", ""); print "FullyQualifiedName~" $0 }
             ' /tmp/tr_selected.txt | sort -u | paste -sd'|' -)
             dotnet test $PYTEST_ARGS --filter "$FILTER" --logger "junit;LogFilePath=$PWD/$JUNIT_PATH"
+          elif [ "$RUNNER" = "jest" ]; then
+            # Manifest entries are spec file paths; run exactly those files.
+            JEST_JUNIT_OUTPUT_DIR="$(dirname "$JUNIT_PATH")" \
+            JEST_JUNIT_OUTPUT_NAME="$(basename "$JUNIT_PATH")" \
+            JEST_JUNIT_CLASSNAME="{filepath}" \
+              xargs -a /tmp/tr_selected.txt npx jest --ci \
+                --reporters=default --reporters=jest-junit $PYTEST_ARGS --runTestsByPath
           else
             xargs -a /tmp/tr_selected.txt python -m pytest --junitxml="$JUNIT_PATH" $PYTEST_ARGS
           fi

@@ -24,10 +24,14 @@ inputs:
     description: 'Command that runs the TestRooster .NET coverage collector (dotnet only)'
     required: false
     default: 'testrooster-dotnetcover'
-  test-project:
-    description: 'Test project directory (dotnet only)'
+  jestcover-cmd:
+    description: 'Command that runs the TestRooster Jest coverage collector (jest only)'
     required: false
-    default: '.'
+    default: 'testrooster-jestcover'
+  test-project:
+    description: 'Test project directory (dotnet only; empty = auto-discover all test projects)'
+    required: false
+    default: ''
 
 runs:
   using: 'composite'
@@ -39,6 +43,7 @@ runs:
         PYTEST_ARGS: ${{ inputs.pytest-args }}
         GOCOVER_CMD: ${{ inputs.gocover-cmd }}
         DOTNETCOVER_CMD: ${{ inputs.dotnetcover-cmd }}
+        JESTCOVER_CMD: ${{ inputs.jestcover-cmd }}
         TEST_PROJECT: ${{ inputs.test-project }}
       run: |
         set -euo pipefail
@@ -51,6 +56,9 @@ runs:
           # reference the coverlet.msbuild package).
           $DOTNETCOVER_CMD -project "$TEST_PROJECT" -repo-root . \
             -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
+        elif [ "$RUNNER" = "jest" ]; then
+          # Per-spec-file Istanbul collection.
+          $JESTCOVER_CMD -dir . -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
         else
           # Per-test dynamic contexts are what make the reverse index possible.
           if [ ! -f .coveragerc ] && [ ! -f setup.cfg ] || ! grep -rq dynamic_context .coveragerc setup.cfg pyproject.toml 2>/dev/null; then
