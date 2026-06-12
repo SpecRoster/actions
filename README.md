@@ -61,3 +61,22 @@ shipped bug.
 
 Source of truth for these actions lives in the main TestRooster repository;
 this repo is a published mirror. Issues → the TestRooster org.
+
+## Installing the coverage collectors
+
+The non-pytest `coverage` runners need a `testrooster-*cover` collector
+binary on the runner's PATH (pytest's collection is plain coverage.py and
+needs nothing extra). Grab the latest from this repo's Releases:
+
+```yaml
+- name: Install TestRooster collector
+  run: |
+    curl -fsSL -o /usr/local/bin/testrooster-dotnetcover \
+      https://github.com/TestRooster/actions/releases/latest/download/testrooster-dotnetcover_linux_amd64
+    chmod +x /usr/local/bin/testrooster-dotnetcover
+```
+
+Available: `testrooster-gocover` (Go projects can also `go run` it),
+`testrooster-dotnetcover`, `testrooster-jestcover`, `testrooster-jvmcover`,
+`testrooster-rbcover`, `testrooster-phpcover` — each for
+`linux`/`darwin` × `amd64`/`arm64`, with `SHA256SUMS` alongside.
