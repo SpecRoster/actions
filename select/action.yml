@@ -1,18 +1,18 @@
-name: 'TestRooster Select'
+name: 'SpecRoster Select'
 description: >
   Run only the tests in your change's blast radius. Exchanges a GitHub
-  Actions OIDC token for a TestRooster run token (no API keys to manage),
+  Actions OIDC token for a SpecRoster run token (no API keys to manage),
   fetches the selection manifest, runs the subset with pytest, and reports
   results. In shadow mode (the default for new installs) the full suite
   still runs — nothing is skipped until you've seen the would-be savings.
-author: 'TestRooster'
+author: 'SpecRoster'
 branding:
   icon: 'filter'
   color: 'orange'
 
 inputs:
   api-url:
-    description: 'TestRooster API base URL'
+    description: 'SpecRoster API base URL'
     required: true
   runner:
     description: 'Test runner: pytest, gotest, dotnet, jest, junit, rspec, cargo, or phpunit'
@@ -33,7 +33,7 @@ inputs:
   junit-path:
     description: 'Where to write the JUnit report'
     required: false
-    default: 'testrooster-junit.xml'
+    default: 'specroster-junit.xml'
   trigger:
     description: 'pr (blast radius over the change set) or nightly (value-ranked budget-fill over the whole suite)'
     required: false
@@ -49,7 +49,7 @@ inputs:
 
 outputs:
   run-id:
-    description: 'TestRooster run id'
+    description: 'SpecRoster run id'
     value: ${{ steps.select.outputs.run_id }}
   selected-count:
     description: 'Number of tests selected'
@@ -93,7 +93,7 @@ runs:
 
         # 2. Prove identity with OIDC (needs `permissions: id-token: write`).
         OIDC=$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=testrooster" | jq -r .value)
+          "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=specroster" | jq -r .value)
         TR_TOKEN=$(curl -sSf -X POST "$API_URL/api/v1/token" \
           -H 'Content-Type: application/json' \
           -d "$(jq -n --arg t "$OIDC" '{oidc_token: $t}')" | jq -r .token)
@@ -134,7 +134,7 @@ runs:
         echo "TR_SHADOW=$SHADOW" >> "$GITHUB_ENV"
         echo "TR_RUN_FULL=$RUN_FULL" >> "$GITHUB_ENV"
 
-        echo "## TestRooster" >> "$GITHUB_STEP_SUMMARY"
+        echo "## SpecRoster" >> "$GITHUB_STEP_SUMMARY"
         if [ "$RUN_FULL" = "true" ]; then
           echo "No coverage snapshot yet — running the full suite." >> "$GITHUB_STEP_SUMMARY"
         else
@@ -258,7 +258,7 @@ runs:
           # Empty blast radius: running the runner with no args would run
           # the FULL suite — the exact opposite of an empty selection.
           echo "No tests in the blast radius — nothing to run."
-          echo '<?xml version="1.0"?><testsuite name="testrooster" tests="0"/>' > "$JUNIT_PATH"
+          echo '<?xml version="1.0"?><testsuite name="specroster" tests="0"/>' > "$JUNIT_PATH"
           TR_EXIT=0
         else
           run_subset
@@ -267,7 +267,7 @@ runs:
         echo "TR_EXIT=$TR_EXIT" >> "$GITHUB_ENV"
         exit 0
 
-    - name: Report results to TestRooster
+    - name: Report results to SpecRoster
       shell: bash
       env:
         API_URL: ${{ inputs.api-url }}
@@ -294,7 +294,7 @@ runs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
         else
-          echo "::warning::failed to upload results to TestRooster"
+          echo "::warning::failed to upload results to SpecRoster"
         fi
         # The check result lands in THIS job: exit with the test status.
         exit "${TR_EXIT:-1}"
