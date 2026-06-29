@@ -1,8 +1,8 @@
-# TestRooster Actions 🐓
+# SpecRoster Actions 🐓
 
-GitHub Actions for [TestRooster](https://github.com/TestRooster) — the
+GitHub Actions for [SpecRoster](https://github.com/SpecRoster) — the
 orchestration control plane for test execution. These are thin shims that
-run inside **your** CI: they authenticate to TestRooster via GitHub Actions
+run inside **your** CI: they authenticate to SpecRoster via GitHub Actions
 OIDC (no API keys to manage), fetch the **Blast Radius** selection manifest,
 run the selected tests, and report results back. All product logic lives
 server-side.
@@ -17,20 +17,20 @@ Add to your existing `pull_request` workflow:
 ```yaml
 permissions:
   contents: read
-  id-token: write          # OIDC exchange with TestRooster
+  id-token: write          # OIDC exchange with SpecRoster
 
 steps:
   - uses: actions/checkout@v4
     with: { fetch-depth: 0 }    # the diff needs the PR base
-  - uses: TestRooster/actions/select@v1
+  - uses: SpecRoster/actions/select@v1
     with:
-      api-url: https://your-testrooster-host
+      api-url: https://your-specroster-host
       src-dir: src/mypkg        # pytest only
       # runner: gotest          # for Go projects
 ```
 
 In **shadow mode** (the default for new installs) the full suite still runs
-— TestRooster reports what it *would* have selected and its measured
+— SpecRoster reports what it *would* have selected and its measured
 would-be miss-rate before anything is ever skipped.
 
 Inputs: `api-url` (required) · `runner` (`pytest`|`gotest`) · `src-dir` ·
@@ -46,9 +46,9 @@ on:
 
 steps:
   - uses: actions/checkout@v4
-  - uses: TestRooster/actions/coverage@v1
+  - uses: SpecRoster/actions/coverage@v1
     with:
-      api-url: https://your-testrooster-host
+      api-url: https://your-specroster-host
       # runner: gotest
 ```
 
@@ -59,24 +59,24 @@ shipped bug.
 
 ---
 
-Source of truth for these actions lives in the main TestRooster repository;
-this repo is a published mirror. Issues → the TestRooster org.
+Source of truth for these actions lives in the main SpecRoster repository;
+this repo is a published mirror. Issues → the SpecRoster org.
 
 ## Installing the coverage collectors
 
-The non-pytest `coverage` runners need a `testrooster-*cover` collector
+The non-pytest `coverage` runners need a `specroster-*cover` collector
 binary on the runner's PATH (pytest's collection is plain coverage.py and
 needs nothing extra). Grab the latest from this repo's Releases:
 
 ```yaml
-- name: Install TestRooster collector
+- name: Install SpecRoster collector
   run: |
-    curl -fsSL -o /usr/local/bin/testrooster-dotnetcover \
-      https://github.com/TestRooster/actions/releases/latest/download/testrooster-dotnetcover_linux_amd64
-    chmod +x /usr/local/bin/testrooster-dotnetcover
+    curl -fsSL -o /usr/local/bin/specroster-dotnetcover \
+      https://github.com/SpecRoster/actions/releases/latest/download/specroster-dotnetcover_linux_amd64
+    chmod +x /usr/local/bin/specroster-dotnetcover
 ```
 
-Available: `testrooster-gocover` (Go projects can also `go run` it),
-`testrooster-dotnetcover`, `testrooster-jestcover`, `testrooster-jvmcover`,
-`testrooster-rbcover`, `testrooster-phpcover` — each for
+Available: `specroster-gocover` (Go projects can also `go run` it),
+`specroster-dotnetcover`, `specroster-jestcover`, `specroster-jvmcover`,
+`specroster-rbcover`, `specroster-phpcover` — each for
 `linux`/`darwin` × `amd64`/`arm64`, with `SHA256SUMS` alongside.
