@@ -2,9 +2,12 @@ name: 'SpecRoster Select'
 description: >
   Run only the tests in your change's blast radius. Exchanges a GitHub
   Actions OIDC token for a SpecRoster run token (no API keys to manage),
-  fetches the selection manifest, runs the subset with pytest, and reports
-  results. In shadow mode (the default for new installs) the full suite
-  still runs — nothing is skipped until you've seen the would-be savings.
+  fetches the selection manifest, runs the subset with your test runner,
+  and reports results. In shadow mode (the default for new installs) the
+  full suite still runs — nothing is skipped until you've seen the
+  would-be savings. Pipelines that already run their own tests (e.g.
+  sharded matrices with a merge job) can pass junit-input instead:
+  observe mode reports your merged results without running anything.
 author: 'SpecRoster'
 branding:
   icon: 'filter'
@@ -31,7 +34,7 @@ inputs:
     required: false
     default: ''
   junit-path:
-    description: 'Where to write the JUnit report'
+    description: 'Where to write the JUnit report (ignored when junit-input is set)'
     required: false
     default: 'specroster-junit.xml'
   trigger:
@@ -53,6 +56,17 @@ inputs:
       Set to an empty string to disable posting.
     required: false
     default: ${{ github.token }}
+  junit-input:
+    description: >-
+      OBSERVE MODE: path to a JUnit XML report your OWN pipeline already
+      produced (e.g. merged results from sharded/matrix test jobs). When
+      set, the action does not run any tests — it computes the selection,
+      reports the provided results to SpecRoster, and posts the PR surface.
+      Outcome is derived from the report (any <failure>/<error> = failed).
+      In observe mode this step never fails the job: your own test jobs
+      remain the gate.
+    required: false
+    default: ''
 
 outputs:
   run-id:
@@ -152,6 +166,8 @@ runs:
         fi
 
     - name: Run tests
+      # Observe mode: the caller's pipeline runs the tests; skip this step.
+      if: ${{ inputs.junit-input == '' }}
       shell: bash
       env:
         RUNNER: ${{ inputs.runner }}
@@ -279,29 +295,58 @@ runs:
       env:
         API_URL: ${{ inputs.api-url }}
         JUNIT_PATH: ${{ inputs.junit-path }}
+        JUNIT_INPUT: ${{ inputs.junit-input }}
         GH_TOKEN: ${{ inputs.github-token }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         set -euo pipefail
+        # Observe mode (junit-input set): report the caller's own results.
+        # The outcome comes from the report itself, and this step never
+        # fails the job — the caller's test jobs are the gate.
+        OBSERVE=false
+        SKIP_UPLOAD=false
         OUTCOME=passed
-        [ "${TR_EXIT:-1}" -eq 0 ] || OUTCOME=failed
-        if curl -sSf -X POST "$API_URL/api/v1/runs/$TR_RUN_ID/results?outcome=$OUTCOME" \
+        if [ -n "${JUNIT_INPUT:-}" ]; then
+          OBSERVE=true
+          JUNIT_PATH="$JUNIT_INPUT"
+          if [ ! -s "$JUNIT_PATH" ]; then
+            # Still post the selection-time preview so the PR isn't silent.
+            echo "::warning::SpecRoster observe mode: junit-input '$JUNIT_PATH' is missing or empty — posting the selection preview only"
+            SKIP_UPLOAD=true
+            TR_EXIT=0
+          # Whitespace after the tag name is legal XML (pretty-printers
+          # split attributes onto new lines) — [[:space:]] and $ cover it.
+          elif grep -qE "<(failure|error)([[:space:]>/]|$)" "$JUNIT_PATH"; then
+            OUTCOME=failed; TR_EXIT=1
+            echo "observe mode: reporting $JUNIT_PATH (outcome: failed)"
+          else
+            OUTCOME=passed; TR_EXIT=0
+            echo "observe mode: reporting $JUNIT_PATH (outcome: passed)"
+          fi
+        else
+          [ "${TR_EXIT:-1}" -eq 0 ] || OUTCOME=failed
+        fi
+        if [ "$SKIP_UPLOAD" = "true" ]; then
+          : # nothing to upload; the poster falls back to the /runs preview
+        elif curl -sSf -X POST "$API_URL/api/v1/runs/$TR_RUN_ID/results?outcome=$OUTCOME" \
           -H "Authorization: Bearer $TR_TOKEN" \
           -H 'Content-Type: application/xml' \
           --data-binary "@$JUNIT_PATH" > /tmp/tr_report.json; then
           # Shadow report: what selection WOULD have missed (cost: nothing —
-          # the full suite ran). This is the trust metric.
-          if [ "$(jq -r .audited /tmp/tr_report.json)" = "true" ]; then
-            MISSED=$(jq -r '.missed | length' /tmp/tr_report.json)
-            RATE=$(jq -r '.projected_miss_rate * 100 | round' /tmp/tr_report.json)
-            RUNS=$(jq -r .shadow_runs /tmp/tr_report.json)
+          # the full suite ran). This is the trust metric. Best-effort: a
+          # malformed report body must never fail the step (observe mode
+          # promises the caller's job is untouched).
+          if [ "$(jq -r '.audited // false' /tmp/tr_report.json)" = "true" ]; then
             {
+              MISSED=$(jq -r '.missed | length' /tmp/tr_report.json)
+              RATE=$(jq -r '(.projected_miss_rate // 0) * 100 | round' /tmp/tr_report.json)
+              RUNS=$(jq -r .shadow_runs /tmp/tr_report.json)
               echo ""
               echo "**Shadow audit:** $MISSED failure(s) outside the selected set this run."
               jq -r '.missed[] | "- would have missed: `\(.)`"' /tmp/tr_report.json
               echo "Projected miss-rate so far: **$RATE%** over $RUNS audited run(s)."
-            } >> "$GITHUB_STEP_SUMMARY"
+            } >> "$GITHUB_STEP_SUMMARY" || echo "::warning::SpecRoster: could not render the shadow-audit summary"
           fi
         else
           echo "::warning::failed to upload results to SpecRoster"
@@ -387,5 +432,10 @@ runs:
         }
         post_to_github || true
 
-        # The check result lands in THIS job: exit with the test status.
+        # Observe mode never fails the job (the caller's test jobs are the
+        # gate). Run mode: the check result lands in THIS job — exit with
+        # the real test status.
+        if [ "$OBSERVE" = "true" ]; then
+          exit 0
+        fi
         exit "${TR_EXIT:-1}"
