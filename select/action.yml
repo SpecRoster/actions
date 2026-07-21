@@ -46,6 +46,13 @@ inputs:
     description: 'Newline-separated glob patterns over canonical test IDs that always run (the tagged-core floor)'
     required: false
     default: ''
+  github-token:
+    description: >-
+      Token used to post the PR comment and check-run. Needs
+      `pull-requests: write` and `checks: write` in the calling workflow.
+      Set to an empty string to disable posting.
+    required: false
+    default: ${{ github.token }}
 
 outputs:
   run-id:
@@ -272,6 +279,9 @@ runs:
       env:
         API_URL: ${{ inputs.api-url }}
         JUNIT_PATH: ${{ inputs.junit-path }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
       run: |
         set -euo pipefail
         OUTCOME=passed
@@ -296,5 +306,86 @@ runs:
         else
           echo "::warning::failed to upload results to SpecRoster"
         fi
+
+        # WS4a: post the server-rendered PR comment + check-run. Best-effort
+        # by design — a posting failure warns but NEVER changes the job
+        # result. Skips cleanly when there's no PR (nightly/dispatch), no
+        # token (caller opted out), or no rendered surface (old API).
+        # Fork PRs: OIDC is never issued there, so step 1 already failed
+        # before this step — no red check from the poster itself.
+        post_to_github() {
+          [ -n "${GH_TOKEN:-}" ] || { echo "no github-token — skipping PR comment/check"; return 0; }
+          [ -n "${PR_NUMBER:-}" ] || { echo "not a pull_request run — skipping PR comment/check"; return 0; }
+          # WS4b: when the server posted the surface as the SpecRoster App,
+          # the action stands down — the surface lands once, never twice.
+          if [ -s /tmp/tr_report.json ] && \
+             [ "$(jq -r '.posted_by_server // false' /tmp/tr_report.json)" = "true" ]; then
+            echo "SpecRoster posted the PR surface server-side — action standing down"
+            return 0
+          fi
+          # Prefer the final /results rendering; fall back to the
+          # selection-time rendering if the upload failed.
+          RPT=/tmp/tr_report.json
+          if [ ! -s "$RPT" ] || [ -z "$(jq -r '.comment_markdown // empty' "$RPT")" ]; then
+            RPT=/tmp/tr_run.json
+          fi
+          BODY=$(jq -r '.comment_markdown // empty' "$RPT")
+          TITLE=$(jq -r '.check_title // empty' "$RPT")
+          [ -n "$BODY" ] || { echo "API returned no rendered comment — skipping"; return 0; }
+          GH_API="${GITHUB_API_URL:-https://api.github.com}"
+
+          # One comment per PR, updated in place: find ours by the marker
+          # (the exact string is frozen in internal/prsurface.Marker).
+          # Paginate — the comment may sit past the first page on chatty
+          # PRs, and posting a "new" one there would duplicate forever.
+          CID=""
+          LIST_OK=true
+          for PAGE in 1 2 3 4 5 6 7 8 9 10; do
+            RESP=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$GH_API/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100&page=$PAGE") \
+              || { LIST_OK=false; break; }
+            CID=$(printf '%s' "$RESP" \
+              | jq -r '[.[] | select(.body | startswith("<!-- specroster -->"))][0].id // empty')
+            [ -n "$CID" ] && break
+            [ "$(printf '%s' "$RESP" | jq 'length')" -lt 100 ] && break
+          done
+          PAYLOAD=$(jq -n --arg b "$BODY" '{body: $b}')
+          if [ "$LIST_OK" != "true" ]; then
+            # Listing failed: POSTing blind could duplicate — skip this
+            # cycle instead (the next run updates the comment anyway).
+            echo "::warning::SpecRoster: could not list PR comments — skipping the comment update this run"
+          elif [ -n "$CID" ]; then
+            curl -sf -X PATCH -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$GH_API/repos/$GITHUB_REPOSITORY/issues/comments/$CID" \
+              -d "$PAYLOAD" > /dev/null \
+              || echo "::warning::SpecRoster: could not update the PR comment"
+          else
+            curl -sf -X POST -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$GH_API/repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              -d "$PAYLOAD" > /dev/null \
+              || echo "::warning::SpecRoster: could not post the PR comment (grant 'pull-requests: write' in the workflow)"
+          fi
+
+          # Stable check NAME (branch protection matches on it); the per-run
+          # numbers live in output.title. Shadow renders neutral — the
+          # customer's real suite stays the gate.
+          if [ -n "$TITLE" ] && [ -n "${PR_HEAD_SHA:-}" ]; then
+            if [ "${TR_SHADOW:-true}" = "true" ]; then CONCLUSION=neutral
+            elif [ "${TR_EXIT:-1}" -eq 0 ]; then CONCLUSION=success
+            else CONCLUSION=failure; fi
+            curl -sf -X POST -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$GH_API/repos/$GITHUB_REPOSITORY/check-runs" \
+              -d "$(jq -n --arg sha "$PR_HEAD_SHA" --arg t "$TITLE" --arg s "$BODY" --arg c "$CONCLUSION" \
+                    '{name: "SpecRoster", head_sha: $sha, status: "completed", conclusion: $c,
+                      output: {title: $t, summary: $s}}')" > /dev/null \
+              || echo "::warning::SpecRoster: could not post the check-run (grant 'checks: write' in the workflow)"
+          fi
+        }
+        post_to_github || true
+
         # The check result lands in THIS job: exit with the test status.
         exit "${TR_EXIT:-1}"

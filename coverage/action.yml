@@ -16,22 +16,10 @@ inputs:
     description: 'Extra arguments passed to pytest (pytest only)'
     required: false
     default: ''
-  gocover-cmd:
-    description: 'Command that runs the SpecRoster Go coverage collector (gotest only)'
+  collect-cmd:
+    description: 'Command that runs the consolidated SpecRoster collector (all runners)'
     required: false
-    default: 'go run ./cmd/specroster-gocover'
-  dotnetcover-cmd:
-    description: 'Command that runs the SpecRoster .NET coverage collector (dotnet only)'
-    required: false
-    default: 'specroster-dotnetcover'
-  jestcover-cmd:
-    description: 'Command that runs the SpecRoster Jest coverage collector (jest only)'
-    required: false
-    default: 'specroster-jestcover'
-  collector-cmd:
-    description: 'Command that runs the SpecRoster coverage collector for junit/rspec/cargo/phpunit runners (defaults to specroster-<runner>cover naming)'
-    required: false
-    default: ''
+    default: 'specroster-collect'
   test-project:
     description: 'Test project directory (dotnet only; empty = auto-discover all test projects)'
     required: false
@@ -44,49 +32,19 @@ runs:
       shell: bash
       env:
         RUNNER: ${{ inputs.runner }}
-        PYTEST_ARGS: ${{ inputs.pytest-args }}
-        GOCOVER_CMD: ${{ inputs.gocover-cmd }}
-        DOTNETCOVER_CMD: ${{ inputs.dotnetcover-cmd }}
-        JESTCOVER_CMD: ${{ inputs.jestcover-cmd }}
-        COLLECTOR_CMD: ${{ inputs.collector-cmd }}
+        COLLECT_CMD: ${{ inputs.collect-cmd }}
         TEST_PROJECT: ${{ inputs.test-project }}
+        PYTEST_ARGS: ${{ inputs.pytest-args }}
       run: |
         set -euo pipefail
-        if [ "$RUNNER" = "gotest" ]; then
-          # The collector runs each Test in its own `go test -coverprofile
-          # -coverpkg=./...` invocation — Go's stand-in for per-test contexts.
-          $GOCOVER_CMD -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
-        elif [ "$RUNNER" = "dotnet" ]; then
-          # Per-test coverlet.msbuild collection (test project must
-          # reference the coverlet.msbuild package).
-          $DOTNETCOVER_CMD -project "$TEST_PROJECT" -repo-root . \
-            -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
-        elif [ "$RUNNER" = "jest" ]; then
-          # Per-spec-file Istanbul collection.
-          $JESTCOVER_CMD -dir . -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
-        elif [ "$RUNNER" = "junit" ]; then
-          ${COLLECTOR_CMD:-specroster-jvmcover} -dir . -repo-root . \
-            -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
-        elif [ "$RUNNER" = "rspec" ]; then
-          ${COLLECTOR_CMD:-specroster-rbcover} -dir . \
-            -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
-        elif [ "$RUNNER" = "cargo" ]; then
-          # Needs cargo-llvm-cov installed (cargo +stable install cargo-llvm-cov).
-          ${COLLECTOR_CMD:-specroster-rustcover} -dir . \
-            -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
-        elif [ "$RUNNER" = "phpunit" ]; then
-          ${COLLECTOR_CMD:-specroster-phpcover} -dir . -repo-root . \
-            -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
-        else
-          # Per-test dynamic contexts are what make the reverse index possible.
-          if [ ! -f .coveragerc ] && [ ! -f setup.cfg ] || ! grep -rq dynamic_context .coveragerc setup.cfg pyproject.toml 2>/dev/null; then
-            printf '[run]\ndynamic_context = test_function\n' > /tmp/tr_coveragerc
-            export COVERAGE_RCFILE=/tmp/tr_coveragerc
-          fi
-          python -m coverage run -m pytest $PYTEST_ARGS
-          python -m coverage json --show-contexts -o /tmp/tr_coverage.json
-          python -m pytest --collect-only -q > /tmp/tr_collected.txt || true
-        fi
+        # One uniform invocation for every runner. The per-runner logic
+        # (which native tool to drive, which flags apply) lives in the
+        # collector's tested Go dispatch, not in this shell. Runner-
+        # irrelevant flags are ignored by the binary.
+        $COLLECT_CMD -runner "$RUNNER" \
+          -project "$TEST_PROJECT" \
+          -pytest-args "$PYTEST_ARGS" \
+          -o /tmp/tr_coverage.json -collected /tmp/tr_collected.txt
 
     - name: Upload snapshot
       shell: bash
